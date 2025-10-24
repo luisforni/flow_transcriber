@@ -1,0 +1,5 @@
+flet>=0.28.0
+python-dotenv>=1.0.1
+tqdm>=4.67.1
+ffmpeg-python>=0.2.0
+openai-whisper==20240930
