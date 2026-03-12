@@ -1,254 +1,304 @@
 import sys
-import threading
-import queue
+import os
 import shutil
+import tempfile
 from pathlib import Path
-from typing import List
-import flet as ft
+
+import streamlit as st
 
 SRC = Path(__file__).parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from flow_transcriber.config import settings
-from flow_transcriber.media.mkv_to_mp3 import extract_audio_segments
+from flow_transcriber.media.extractor import extract_audio_segments, SUPPORTED_EXTENSIONS
 from flow_transcriber.transcribe.whisper_transcriber import WhisperTranscriber
 from flow_transcriber.text.splitter import concat_and_chunk_with_header
+from flow_transcriber.llm.ollama_client import OllamaClient
 
 
-def clean_dir(p: Path):
+def clean_dir(p: Path) -> None:
     if p.exists():
         shutil.rmtree(p, ignore_errors=True)
 
 
-def ensure_clean_work(mp3_dir: Path, txt_dir: Path):
-    clean_dir(mp3_dir.parent if mp3_dir.name == "mp3" else mp3_dir)
-    clean_dir(txt_dir.parent if txt_dir.name == "txt" else txt_dir)
-    mp3_dir.mkdir(parents=True, exist_ok=True)
-    txt_dir.mkdir(parents=True, exist_ok=True)
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Flow Transcriber",
+    page_icon="🎙️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
+st.markdown("""
+<style>
+    /* Oculta el menú de hamburguesa y footer de Streamlit */
+    #MainMenu, footer { visibility: hidden; }
 
-def main(page: ft.Page):
-    page.title = "Flow Transcriber (Flet)"
-    page.window_width = 1200
-    page.window_height = 800
-    page.scroll = ft.ScrollMode.ALWAYS
-    page.theme_mode = ft.ThemeMode.DARK
+    /* Encabezado principal */
+    .ft-title { font-size: 1.9rem; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 0; }
+    .ft-sub   { color: #888; font-size: 0.9rem; margin-top: 2px; }
 
-    selected_files: List[Path] = []
+    /* Tarjetas de estado */
+    .ft-card {
+        background: #f8f9fb;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 1rem;
+    }
 
-    file_picker = ft.FilePicker()
-    dir_picker_out = ft.FilePicker()
-    page.overlay.extend([file_picker, dir_picker_out])
+    /* Chat messages más redondeados */
+    [data-testid="stChatMessage"] { border-radius: 14px; }
 
-    whisper_model_dd = ft.Dropdown(
-        label="Modelo Whisper",
-        options=[ft.dropdown.Option(x) for x in ["tiny", "base", "small", "medium", "large"]],
-        value=settings.whisper_model,
-        expand=True,
+    /* Sidebar compacto */
+    [data-testid="stSidebar"] { min-width: 260px; max-width: 290px; }
+    [data-testid="stSidebar"] h3 { font-size: 1rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Session state ─────────────────────────────────────────────────────────────
+for key, default in {
+    "chat_messages": [],
+    "transcription_text": "",
+    "transcription_parts": [],   # list of (filename, content) tuples
+    "auto_message": "",          # auto-sent to OLLAMA after transcription
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 🎙️ Flow Transcriber")
+    st.divider()
+
+    # OLLAMA (primero porque es lo más importante)
+    st.markdown("**🤖 OLLAMA**")
+    ollama_host = st.text_input("Host", value=settings.ollama_host, label_visibility="collapsed",
+                                 placeholder="http://localhost:11434")
+
+    _client = OllamaClient(model="", host=ollama_host)
+    _available = _client.available_models()
+
+    if _available:
+        _idx = _available.index(settings.ollama_model) if settings.ollama_model in _available else 0
+        ollama_model_sel = st.selectbox(
+            "Modelo IA",
+            options=_available,
+            index=_idx,
+            help="Modelos instalados localmente en OLLAMA. Instala más con: ollama pull <nombre>",
+        )
+        st.caption(f"✅ Conectado · {len(_available)} modelo(s) instalado(s)")
+    else:
+        st.warning("⚠️ OLLAMA sin conexión — ejecuta `ollama serve`")
+        ollama_model_sel = st.text_input("Modelo (manual)", value=settings.ollama_model,
+                                          placeholder="llama3, mistral, phi3…")
+
+    st.divider()
+
+    # Whisper
+    st.markdown("**🎤 Whisper**")
+    whisper_model = st.selectbox(
+        "Modelo transcripción",
+        ["tiny", "base", "small", "medium", "large"],
+        index=["tiny", "base", "small", "medium", "large"].index(settings.whisper_model),
     )
-    language_tf = ft.TextField(label="Idioma (ISO, vacío = autodetect)", value=(settings.language or "es"), expand=True)
-    segment_secs_tf = ft.TextField(label="Segmento (seg.)", value=str(settings.segment_seconds or 300), expand=True)
-    max_chars_tf = ft.TextField(label="Máx. caracteres por TXT", value=str(settings.max_chars or 20000), expand=True)
-    header_template_ta = ft.TextField(
-        label="Encabezado / Prompt",
-        value=settings.header_template,
-        multiline=True,
-        min_lines=6,
-        max_lines=10,
-        expand=True,
+    language = st.text_input("Idioma (ISO)", value=settings.language or "es",
+                              placeholder="es, en, fr…")
+
+    st.divider()
+
+    # Avanzado colapsado
+    with st.expander("⚙️ Ajustes avanzados"):
+        segment_secs  = st.number_input("Segmento (seg.)", 30, 3600, settings.segment_seconds or 300, 30)
+        max_chars     = st.number_input("Máx. chars/fichero", 1000, 200000, settings.max_chars or 20000, 1000)
+        output_format = st.radio("Formato", ["txt", "md"], horizontal=True)
+        output_dir    = st.text_input("Dir. salida", value=str(Path(settings.output_dir).resolve()))
+        header_tmpl   = st.text_area("Encabezado fichero", value=settings.header_template, height=70)
+        ollama_system = st.text_area("System prompt IA", value=settings.ollama_system_prompt, height=110)
+
+    st.divider()
+    if st.button("🗑️ Nueva sesión", use_container_width=True):
+        st.session_state.chat_messages    = []
+        st.session_state.transcription_text  = ""
+        st.session_state.transcription_parts = []
+        st.session_state.auto_message     = ""
+        st.rerun()
+
+# ── Header ────────────────────────────────────────────────────────────────────
+st.markdown('<p class="ft-title">🎙️ Flow Transcriber</p>', unsafe_allow_html=True)
+st.markdown('<p class="ft-sub">Transcribe audio · Analiza con IA local (OLLAMA)</p>', unsafe_allow_html=True)
+st.write("")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN 1 — SUBIDA Y TRANSCRIPCIÓN
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sólo se muestra si aún no hay transcripción
+if not st.session_state.transcription_text:
+    ext_list = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+    uploaded = st.file_uploader(
+        f"Arrastra o selecciona un fichero de audio/video  ·  {ext_list}",
+        type=[e.lstrip(".") for e in SUPPORTED_EXTENSIONS],
+        label_visibility="visible",
     )
 
-    input_file_tf = ft.TextField(label="Fichero .mkv", expand=True, read_only=True)
-    output_dir_tf = ft.TextField(label="Directorio de salida final", value=str(Path(settings.output_dir)), expand=True)
-    work_mp3_tf = ft.TextField(label="Work MP3", value=str(Path(settings.work_mp3_dir)), expand=True)
-    work_txt_tf = ft.TextField(label="Work TXT", value=str(Path(settings.work_txt_dir)), expand=True)
+    col_info, col_btn = st.columns([4, 1])
+    if uploaded:
+        col_info.info(f"📄 **{uploaded.name}**  ·  {uploaded.size / 1_048_576:.1f} MB")
+    col_btn.write("")  # spacing
+    run = col_btn.button("▶️ Transcribir", type="primary", disabled=uploaded is None, use_container_width=True)
 
-    files_lv = ft.ListView(expand=True, spacing=6, height=240, auto_scroll=True)
-    log_area = ft.TextField(
-        value="", multiline=True, min_lines=8, max_lines=14, expand=True,
-        read_only=True, border=ft.InputBorder.OUTLINE, label="Log"
-    )
-    progress = ft.ProgressBar(width=400, value=0)
+    if run and uploaded:
+        out_dir   = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        work_root = Path(tempfile.mkdtemp(prefix="ft_"))
+        mp3_dir   = work_root / "mp3"
+        txt_dir   = work_root / "txt"
+        mp3_dir.mkdir(); txt_dir.mkdir()
 
-    log_queue: "queue.Queue[str]" = queue.Queue()
-    progress_queue: "queue.Queue[float]" = queue.Queue()
-    done_flag = threading.Event()
+        tmp_input = work_root / f"input{Path(uploaded.name).suffix}"
+        tmp_input.write_bytes(uploaded.read())
 
-    def refresh_loop():
-        while not done_flag.is_set():
-            updated = False
-            while not log_queue.empty():
-                msg = log_queue.get_nowait()
-                log_area.value = (log_area.value or "") + msg + "\n"
-                updated = True
-            while not progress_queue.empty():
-                v = progress_queue.get_nowait()
-                progress.value = v
-                updated = True
-            if updated:
-                try:
-                    page.update()
-                except Exception:
-                    pass
-            threading.Event().wait(0.4)
+        status_box = st.empty()
+        bar = st.progress(0, text="Iniciando…")
 
-    def on_pick_file(e: ft.FilePickerResultEvent):
-        selected_files.clear()
-        files_lv.controls.clear()
-        if e.files and len(e.files) > 0:
-            path = e.files[0].path
-            input_file_tf.value = path
-            p = Path(path)
-            if p.exists():
-                selected_files.append(p)
-                files_lv.controls.append(ft.Text(str(p)))
-            else:
-                files_lv.controls.append(ft.Text("Ruta inválida o inexistente"))
-        else:
-            input_file_tf.value = ""
-            files_lv.controls.append(ft.Text("No se seleccionó fichero"))
-        page.update()
-
-    def on_pick_output_dir(e: ft.FilePickerResultEvent):
-        if e.path:
-            output_dir_tf.value = e.path
-            page.update()
-
-    file_picker.on_result = on_pick_file
-    dir_picker_out.on_result = on_pick_output_dir
-
-    def choose_file_click(e):
-        file_picker.pick_files(allow_multiple=False, allowed_extensions=["mkv"])
-
-    def choose_out_dir_click(e):
-        dir_picker_out.get_directory_path()
-
-    def run_processing():
         try:
-            model_name = whisper_model_dd.value or "base"
-            lang = (language_tf.value or "").strip() or None
-            seg = int(segment_secs_tf.value or "300")
-            max_chars = int(max_chars_tf.value or "20000")
-            header_tpl = header_template_ta.value or "<<TRANSCRIPCION>>\n"
+            bar.progress(0.05, text="Extrayendo audio…")
+            mp3_list = extract_audio_segments(tmp_input, mp3_dir, int(segment_secs))
+            bar.progress(0.30, text=f"{len(mp3_list)} segmento(s) extraído(s)")
 
-            out_dir = Path(output_dir_tf.value).resolve()
-            mp3_dir = Path(work_mp3_tf.value).resolve()
-            txt_dir = Path(work_txt_tf.value).resolve()
+            bar.progress(0.40, text="Cargando modelo Whisper…")
+            lang = language.strip() or None
+            transcriber = WhisperTranscriber(model_name=whisper_model, language=lang)
 
-            ensure_clean_work(mp3_dir, txt_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
+            bar.progress(0.50, text="Transcribiendo… (puede tardar)")
+            txt_list = transcriber.transcribe_files(mp3_list, txt_dir)
+            bar.progress(0.85, text="Compilando fichero…")
 
-            log_queue.put(f"Salida: {out_dir}")
-            log_queue.put("Cargando Whisper")
-            transcriber = WhisperTranscriber(model_name=model_name, language=lang)
+            parts = concat_and_chunk_with_header(
+                txt_files=txt_list,
+                out_dir=out_dir,
+                max_chars=int(max_chars),
+                header_template=header_tmpl,
+                language=lang,
+                source_name=uploaded.name,
+                output_ext=output_format,
+            )
+            bar.progress(1.0, text="✅ Transcripción completada")
 
-            total = len(selected_files)
-            done = 0
+            # Guardar en session state
+            st.session_state.transcription_text  = "\n\n".join(
+                p.read_text(encoding="utf-8") for p in parts
+            )
+            st.session_state.transcription_parts = [
+                (p.name, p.read_text(encoding="utf-8")) for p in parts
+            ]
+            # Desencadenar análisis automático en OLLAMA
+            st.session_state.auto_message = (
+                "Acabo de transcribir un audio. Analiza el contenido, "
+                "haz un resumen claro y destaca los puntos más importantes."
+            )
 
-            for mkv in list(selected_files):
-                try:
-                    log_queue.put(f"Procesando: {mkv.name}")
-                    mp3_list = extract_audio_segments(mkv, mp3_dir, seg)
-                    log_queue.put(f"MP3: {len(mp3_list)}")
-                    txt_list = transcriber.transcribe_files(mp3_list, txt_dir)
-                    log_queue.put(f"TXT: {len(txt_list)}")
-                    parts = concat_and_chunk_with_header(
-                        txt_files=txt_list,
-                        out_dir=out_dir,
-                        max_chars=max_chars,
-                        header_template=header_tpl,
-                        language=(lang or None),
-                        source_name=mkv.name,
-                    )
-                    for p in parts:
-                        log_queue.put(str(p.resolve()))
-                except Exception as ex:
-                    log_queue.put(f"Error: {ex}")
-                    raise
-                done += 1
-                progress_queue.put(done / max(total, 1))
-
-            log_queue.put("Finalizado")
         except Exception as ex:
-            log_queue.put(f"Fallo general: {ex}")
+            status_box.error(f"❌ Error durante la transcripción: {ex}")
+            st.exception(ex)
         finally:
-            try:
-                p = Path(work_mp3_tf.value).resolve()
-                clean_dir(p.parent if p.name == "mp3" else p)
-            except Exception:
-                pass
-            try:
-                p = Path(work_txt_tf.value).resolve()
-                clean_dir(p.parent if p.name == "txt" else p)
-            except Exception:
-                pass
-            done_flag.set()
+            clean_dir(work_root)
 
-    def process_click(e):
-        files_lv.controls.clear()
-        selected_files.clear()
-        if input_file_tf.value.strip():
-            p = Path(input_file_tf.value.strip())
-            if p.exists() and p.is_file():
-                selected_files.append(p)
-                files_lv.controls.append(ft.Text(str(p)))
-            else:
-                files_lv.controls.append(ft.Text("Ruta de fichero inválida o inexistente"))
-        else:
-            files_lv.controls.append(ft.Text("No hay fichero seleccionado"))
-        page.update()
-        if not selected_files:
-            log_area.value = (log_area.value or "") + "Sin archivos para procesar\n"
-            page.update()
-            return
-        progress.value = 0
-        log_area.value = ""
-        page.update()
+        st.rerun()
 
+else:
+    # ── Resultado de transcripción (compacto, colapsado) ─────────────────────
+    n_parts = len(st.session_state.transcription_parts)
+    with st.expander(f"📄 Transcripción lista — {n_parts} parte(s)  ·  click para ver / descargar"):
+        for fname, content in st.session_state.transcription_parts:
+            st.caption(f"**{fname}**")
+            st.text_area("", content, height=220, key=f"view_{fname}", label_visibility="collapsed")
+            st.download_button(
+                f"⬇️ Descargar {fname}",
+                data=content.encode("utf-8"),
+                file_name=fname,
+                mime="text/plain",
+                key=f"dl_{fname}",
+            )
+        st.write("")
+
+st.divider()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN 2 — CHAT CON OLLAMA
+# ═══════════════════════════════════════════════════════════════════════════════
+if not st.session_state.transcription_text and not st.session_state.chat_messages:
+    st.markdown(
+        "<div style='text-align:center;color:#aaa;padding:3rem 0'>"
+        "🤖 Transcribe un fichero de audio para comenzar el análisis con IA,<br>"
+        "o escribe directamente en el chat para una conversación libre."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+# Mostrar historial de mensajes
+for msg in st.session_state.chat_messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ── Determinar prompt: auto (post-transcripción) o manual ────────────────────
+auto_msg = st.session_state.auto_message
+if auto_msg:
+    st.session_state.auto_message = ""   # limpiar antes de renderizar
+
+user_input = st.chat_input(
+    "Pregunta sobre la transcripción o inicia una conversación…"
+    if st.session_state.transcription_text
+    else "Chat libre con OLLAMA…"
+)
+
+current_prompt = auto_msg or user_input
+
+if current_prompt:
+    # Si es auto_message mostramos un mensaje de usuario más amigable
+    display_prompt = (
+        "📋 *Analizando la transcripción automáticamente…*"
+        if auto_msg else current_prompt
+    )
+
+    st.session_state.chat_messages.append({"role": "user", "content": display_prompt})
+    with st.chat_message("user"):
+        st.markdown(display_prompt)
+
+    # System prompt: inyectar transcripción si existe
+    ctx = st.session_state.transcription_text.strip()
+    system_ctx = (
+        (ollama_system if "ollama_system" in dir() else settings.ollama_system_prompt)
+        + ("\n\n---\nCONTEXTO — transcripción del audio:\n" + ctx if ctx else "")
+    )
+
+    ollama_client = OllamaClient(
+        model=ollama_model_sel,
+        host=ollama_host,
+    )
+    with st.chat_message("assistant"):
         try:
-            p = Path(work_mp3_tf.value).resolve()
-            clean_dir(p.parent if p.name == "mp3" else p)
-            p = Path(work_txt_tf.value).resolve()
-            clean_dir(p.parent if p.name == "txt" else p)
-        except Exception:
-            pass
-
-        done_flag.clear()
-        threading.Thread(target=refresh_loop, daemon=True).start()
-        threading.Thread(target=run_processing, daemon=True).start()
-
-    left_panel = ft.Column([
-        ft.Text("Carga de fichero", weight=ft.FontWeight.BOLD),
-        ft.Row([
-            input_file_tf,
-            ft.ElevatedButton("Elegir fichero", icon=ft.Icon(name="insert_drive_file"), on_click=choose_file_click)
-        ], spacing=8),
-        ft.Text("Archivos seleccionados", size=12),
-        ft.Container(content=files_lv, height=240),
-    ], spacing=10, expand=True)
-
-    right_panel = ft.Column([
-        ft.Text("Procesamiento", weight=ft.FontWeight.BOLD),
-        ft.Row([ft.ElevatedButton("Procesar", on_click=process_click), progress], spacing=12),
-        ft.Row([
-            output_dir_tf,
-            ft.ElevatedButton("Elegir salida", icon=ft.Icon(name="folder"), on_click=choose_out_dir_click)
-        ], spacing=8),
-        ft.Container(content=log_area, height=200),
-    ], spacing=10, expand=True)
-
-    top_group = ft.Row([left_panel, right_panel], spacing=16)
-
-    config_group = ft.Column([
-        ft.Text("Configuración", weight=ft.FontWeight.BOLD),
-        ft.Row([whisper_model_dd, language_tf, segment_secs_tf, max_chars_tf], spacing=12),
-        header_template_ta,
-        ft.Row([work_mp3_tf, work_txt_tf], spacing=8),
-    ], spacing=10)
-
-    page.add(top_group, ft.Divider(), config_group)
+            response = st.write_stream(
+                ollama_client.stream_chat(
+                    messages=st.session_state.chat_messages,
+                    system=system_ctx,
+                )
+            )
+            st.session_state.chat_messages.append({"role": "assistant", "content": response})
+        except Exception as ex:
+            st.error(
+                f"❌ No se pudo conectar con OLLAMA en `{ollama_host}`.\n\n"
+                f"**Detalle:** `{ex}`\n\n"
+                "Verifica que el servicio esté activo: `ollama serve`"
+            )
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    import subprocess
+    subprocess.run([
+        sys.executable, "-m", "streamlit", "run", __file__,
+        "--server.port", os.getenv("PORT", "8501"),
+        "--server.address", os.getenv("HOST", "127.0.0.1"),
+    ])
+

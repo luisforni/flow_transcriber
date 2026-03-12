@@ -1,5 +1,24 @@
-flet>=0.28.0
+streamlit>=1.32.0
 python-dotenv>=1.0.1
-tqdm>=4.67.1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+WantedBy=multi-user.target[Install]EnvironmentFile=-/home/lf/git/flow_transcriber/.envEnvironment=PYTHONUNBUFFERED=1RestartSec=5Restart=on-failure    --server.headless true    --server.address 127.0.0.1 \    --server.port 8502 \ExecStart=/home/lf/git/flow_transcriber/.venv/bin/streamlit run app.py \WorkingDirectory=/home/lf/git/flow_transcriberUser=lfType=simple[Service]After=network.targettqdm>=4.67.1
 ffmpeg-python>=0.2.0
 openai-whisper==20240930
+ollama>=0.3.0

@@ -1,0 +1,19 @@
+[Unit]
+Description=Flow Transcriber - Production
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/flow_transcriber
+ExecStart=/opt/flow_transcriber/.venv/bin/streamlit run app.py \
+    --server.port 8501 \
+    --server.address 127.0.0.1 \
+    --server.headless true
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/flow_transcriber/.env
+
+[Install]
+WantedBy=multi-user.target

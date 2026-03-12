@@ -10,6 +10,7 @@ def concat_and_chunk_with_header(
     header_template: str,
     language: str | None,
     source_name: str,
+    output_ext: str = "txt",
 ) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(list(txt_files))
@@ -32,7 +33,7 @@ def concat_and_chunk_with_header(
     part_no = 1
     while start < len(big_text):
         chunk = big_text[start:start + max_chars]
-        out_path = out_dir / f"{Path(source_name).stem}_final_part{part_no:02d}.txt"
+        out_path = out_dir / f"{Path(source_name).stem}_final_part{part_no:02d}.{output_ext.lstrip('.')}"
         out_path.write_text(chunk, encoding="utf-8")
         parts.append(out_path)
         start += max_chars
