@@ -213,7 +213,7 @@ else:
     with st.expander(f"📄 Transcripción lista — {n_parts} parte(s)  ·  click para ver / descargar"):
         for fname, content in st.session_state.transcription_parts:
             st.caption(f"**{fname}**")
-            st.text_area("", content, height=220, key=f"view_{fname}", label_visibility="collapsed")
+            st.text_area(fname, content, height=220, key=f"view_{fname}", label_visibility="collapsed")
             st.download_button(
                 f"⬇️ Descargar {fname}",
                 data=content.encode("utf-8"),
@@ -222,6 +222,18 @@ else:
                 key=f"dl_{fname}",
             )
         st.write("")
+
+    # ── Re-analizar con otro modelo ───────────────────────────────────────────
+    col_rerun, col_info = st.columns([1, 3])
+    if col_rerun.button("🔄 Re-analizar con IA", use_container_width=True,
+                         help="Limpia el chat y vuelve a analizar la transcripción con el modelo seleccionado en la barra lateral"):
+        st.session_state.chat_messages = []
+        st.session_state.auto_message = (
+            "Acabo de transcribir un audio. Analiza el contenido, "
+            "haz un resumen claro y destaca los puntos más importantes."
+        )
+        st.rerun()
+    col_info.caption(f"Modelo activo: **{ollama_model_sel}** · Cambia el modelo en la barra lateral antes de re-analizar.")
 
 st.divider()
 
