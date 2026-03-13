@@ -2,7 +2,7 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --frozen-lockfile
+RUN npm install
 
 # ── Stage 2: build ─────────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder

@@ -20,6 +20,9 @@ async def chat_stream(req: ChatRequest):
     system = req.system_prompt
     if req.transcription:
         system += "\n\n---\nCONTEXTO — transcripción del audio:\n" + req.transcription
+    
+    # Añade instrucción para responder en Markdown
+    system += "\n\nResponde SIEMPRE en formato Markdown. Usa:\n- **negrita** para conceptos importantes\n- *cursiva* para énfasis\n- `código` para términos técnicos\n- # Headings para organizar\n- Listas con - o números\n- > Citas para destacar puntos clave"
 
     async def event_stream():
         try:

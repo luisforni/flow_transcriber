@@ -2,10 +2,10 @@ services:
 
   # ── Backend — FastAPI ───────────────────────────────────────────────────────
   backend:
-    build: ./backend
+    build: ./flow-transcriber-backend
     container_name: flow-transcriber-backend
     ports:
-      - "8000:8000"
+      - "8001:8000"
     env_file: .env
     environment:
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
@@ -24,12 +24,13 @@ services:
 
   # ── Frontend — Next.js ──────────────────────────────────────────────────────
   frontend:
-    build: ./frontend
+    build: ./flow-transcriber-frontend
     container_name: flow-transcriber-frontend
     ports:
       - "${PORT:-3000}:3000"
     environment:
-      BACKEND_URL: http://backend:8000
+      BACKEND_URL: http://backend:8001
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8001
     depends_on:
       - backend
     restart: unless-stopped

@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 # ffmpeg para extracción de audio, curl para healthcheck
 RUN apt-get update \
@@ -7,9 +7,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Dependencias primero (capa cacheada)
+# openai-whisper requiere setuptools<70 (pkg_resources se rompe en versiones posteriores)
+RUN pip install --no-cache-dir --upgrade pip wheel "setuptools<70"
+
+# Instalar openai-whisper por separado antes del resto para controlar el entorno de build
+RUN pip install --no-cache-dir --no-build-isolation openai-whisper==20240930
+
+# Resto de dependencias
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN grep -v "openai-whisper" requirements.txt | pip install --no-cache-dir -r /dev/stdin
 
 # Código fuente
 COPY app/ app/

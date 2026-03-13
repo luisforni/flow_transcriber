@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { chatStream, fetchModels } from "@/lib/api";
 import type { ChatMessage } from "@/lib/api";
+import ReactMarkdown from "react-markdown";
 
 type Props = {
   transcription: string;
@@ -20,7 +21,7 @@ export default function ChatPanel({
   onAutoPromptConsumed,
 }: Props) {
   const [host, setHost] = useState("http://localhost:11434");
-  const [model, setModel] = useState("llama3");
+  const [model, setModel] = useState("");
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [systemPrompt, setSystemPrompt] = useState(
     "Eres un asistente experto en análisis de transcripciones de audio. " +
@@ -35,7 +36,12 @@ export default function ChatPanel({
   useEffect(() => {
     fetchModels(host).then((models) => {
       setAvailableModels(models);
-      if (models.length > 0 && !models.includes(model)) setModel(models[0]);
+      // Asignar el primer modelo disponible si no hay uno seleccionado
+      if (models.length > 0) {
+        if (!model || !models.includes(model)) {
+          setModel(models[0]);
+        }
+      }
     });
   }, [host]);
 
@@ -135,11 +141,12 @@ export default function ChatPanel({
             value={model}
             onChange={(e) => setModel(e.target.value)}
             className="border rounded-lg px-2 py-1 text-xs min-w-28"
+            disabled={availableModels.length === 0}
           >
             {availableModels.length > 0 ? (
               availableModels.map((m) => <option key={m}>{m}</option>)
             ) : (
-              <option value={model}>{model}</option>
+              <option value="">Cargando modelos...</option>
             )}
           </select>
         </div>
@@ -173,13 +180,40 @@ export default function ChatPanel({
             className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
           >
             <div
-              className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap
+              className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm
                 ${msg.role === "user"
-                  ? "bg-blue-600 text-white rounded-br-sm"
-                  : "bg-gray-100 text-gray-800 rounded-bl-sm"
+                  ? "bg-blue-600 text-white rounded-br-sm whitespace-pre-wrap"
+                  : "bg-gray-100 text-gray-800 rounded-bl-sm prose prose-sm max-w-none"
                 }`}
             >
-              {msg.content}
+              {msg.role === "user" ? (
+                msg.content
+              ) : (
+                <ReactMarkdown
+                  components={{
+                    p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+                    ul: ({ node, ...props }) => <ul className="list-disc list-inside mb-2" {...props} />,
+                    ol: ({ node, ...props }) => <ol className="list-decimal list-inside mb-2" {...props} />,
+                    li: ({ node, ...props }) => <li className="mb-1" {...props} />,
+                    h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3" {...props} />,
+                    h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2" {...props} />,
+                    h3: ({ node, ...props }) => <h3 className="font-bold mb-1 mt-2" {...props} />,
+                    code: ({ node, inline, ...props }) =>
+                      inline ? (
+                        <code className="bg-gray-200 px-2 py-0.5 rounded text-xs" {...props} />
+                      ) : (
+                        <code className="block bg-gray-200 p-2 rounded mb-2 text-xs overflow-x-auto" {...props} />
+                      ),
+                    blockquote: ({ node, ...props }) => (
+                      <blockquote className="border-l-4 border-gray-400 pl-4 italic mb-2" {...props} />
+                    ),
+                    strong: ({ node, ...props }) => <strong className="font-bold" {...props} />,
+                    em: ({ node, ...props }) => <em className="italic" {...props} />,
+                  }}
+                >
+                  {msg.content}
+                </ReactMarkdown>
+              )}
               {msg.role === "assistant" && msg.content === "" && streaming && (
                 <span className="inline-block w-2 h-3.5 bg-gray-400 animate-pulse ml-0.5" />
               )}
